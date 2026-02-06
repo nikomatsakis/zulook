@@ -2,6 +2,10 @@
 name = "zulook"
 version = "0.1.0"
 edition = "2024"
+description = "Read-only Zulip agent mod — fetch conversations by URL"
+
+[package.metadata.symposium]
+args = ["acp"]
 
 [dependencies]
 reqwest = { version = "0.12", features = ["json"] }
