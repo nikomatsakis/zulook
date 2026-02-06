@@ -1,9 +1,13 @@
 [package]
 name = "zulook"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 description = "Read-only Zulip agent mod — fetch conversations by URL"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/nikomatsakis/zulook"
+homepage = "https://github.com/nikomatsakis/zulook"
+keywords = ["agent-mod", "zulip", "mcp", "acp"]
+categories = ["command-line-utilities"]
 
 [package.metadata.symposium]
 args = ["acp"]
