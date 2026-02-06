@@ -92,18 +92,11 @@ fn parse_dm_operand(operand: &str) -> Vec<i64> {
 pub fn parse_zulip_url(url_str: &str) -> anyhow::Result<ZulipUrl> {
     let parsed = url::Url::parse(url_str)?;
 
-    let base_url = format!(
-        "{}://{}",
-        parsed.scheme(),
-        parsed.host_str().unwrap_or("")
-    );
+    let base_url = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
 
     let fragment = parsed.fragment().unwrap_or("");
 
-    let segments: Vec<&str> = fragment
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segments: Vec<&str> = fragment.split('/').filter(|s| !s.is_empty()).collect();
 
     if segments.first() != Some(&"narrow") {
         anyhow::bail!("Not a Zulip narrow URL (fragment doesn't start with #narrow/)");
@@ -183,20 +176,18 @@ mod tests {
 
     #[test]
     fn test_channel_keyword() {
-        let url = parse_zulip_url(
-            "https://example.zulipchat.com/#narrow/channel/100-design/topic/RFC",
-        )
-        .unwrap();
+        let url =
+            parse_zulip_url("https://example.zulipchat.com/#narrow/channel/100-design/topic/RFC")
+                .unwrap();
         assert_eq!(url.stream_id, Some(100));
         assert_eq!(url.stream_name.as_deref(), Some("design"));
     }
 
     #[test]
     fn test_encoded_topic() {
-        let url = parse_zulip_url(
-            "https://example.zulipchat.com/#narrow/stream/1-test/topic/my.2Etopic",
-        )
-        .unwrap();
+        let url =
+            parse_zulip_url("https://example.zulipchat.com/#narrow/stream/1-test/topic/my.2Etopic")
+                .unwrap();
         assert_eq!(url.topic.as_deref(), Some("my.topic"));
     }
 
@@ -208,10 +199,8 @@ mod tests {
 
     #[test]
     fn test_dm_url() {
-        let url = parse_zulip_url(
-            "https://example.zulipchat.com/#narrow/dm/12345-User-Name",
-        )
-        .unwrap();
+        let url =
+            parse_zulip_url("https://example.zulipchat.com/#narrow/dm/12345-User-Name").unwrap();
         assert!(url.is_dm());
         assert_eq!(url.dm_user_ids, vec![12345]);
         assert!(url.stream_id.is_none());
@@ -219,10 +208,9 @@ mod tests {
 
     #[test]
     fn test_group_dm_url() {
-        let url = parse_zulip_url(
-            "https://example.zulipchat.com/#narrow/dm/12345,67890-Group-Name",
-        )
-        .unwrap();
+        let url =
+            parse_zulip_url("https://example.zulipchat.com/#narrow/dm/12345,67890-Group-Name")
+                .unwrap();
         assert!(url.is_dm());
         assert_eq!(url.dm_user_ids, vec![12345, 67890]);
     }
@@ -240,10 +228,8 @@ mod tests {
 
     #[test]
     fn test_pm_with_url() {
-        let url = parse_zulip_url(
-            "https://example.zulipchat.com/#narrow/pm-with/42-Old-Style",
-        )
-        .unwrap();
+        let url =
+            parse_zulip_url("https://example.zulipchat.com/#narrow/pm-with/42-Old-Style").unwrap();
         assert!(url.is_dm());
         assert_eq!(url.dm_user_ids, vec![42]);
     }

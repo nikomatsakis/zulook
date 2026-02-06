@@ -52,8 +52,13 @@ pub fn default_zuliprc_path() -> Option<PathBuf> {
 fn load_from_env() -> anyhow::Result<ZulipCredentials> {
     let url = std::env::var("ZULIP_URL").map_err(|_| anyhow::anyhow!("ZULIP_URL not set"))?;
     let email = std::env::var("ZULIP_EMAIL").map_err(|_| anyhow::anyhow!("ZULIP_EMAIL not set"))?;
-    let api_key = std::env::var("ZULIP_API_KEY").map_err(|_| anyhow::anyhow!("ZULIP_API_KEY not set"))?;
-    Ok(ZulipCredentials { url, email, api_key })
+    let api_key =
+        std::env::var("ZULIP_API_KEY").map_err(|_| anyhow::anyhow!("ZULIP_API_KEY not set"))?;
+    Ok(ZulipCredentials {
+        url,
+        email,
+        api_key,
+    })
 }
 
 /// Load credentials: ~/zuliprc > env vars.
