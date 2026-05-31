@@ -1,3 +1,4 @@
+use crate::config::CredentialStore;
 use crate::url_parser;
 use crate::zulip::{Message, Narrow, ZulipClient};
 
@@ -48,24 +49,30 @@ fn parse_opt_u32(args: &[&str], key: &str) -> Option<u32> {
 pub const SETUP_HELP: &str = "\
 Setup: configure Zulip credentials.
 
-How to get your zuliprc file:
+Step 1: Get your API key
   1. Log in to your Zulip instance in a browser
   2. Go to Personal settings > Account & privacy tab
   3. Click \"Manage your API key\" and enter your password
-  4. Click \"Download .zuliprc\"
-  5. Move the downloaded file to ~/zuliprc:
-       mv ~/Downloads/zuliprc ~/zuliprc
 
-  For a bot instead of your personal account:
-  1. Go to Personal settings > Bots tab
-  2. Click \"Add a new bot\" > choose \"Generic bot\"
-  3. After creation, download the bot's zuliprc file
-  4. Move to ~/zuliprc
+Step 2: Create ~/.zulookrc with your credentials:
 
-Alternative: set environment variables instead:
-  export ZULIP_URL=https://your-org.zulipchat.com
-  export ZULIP_EMAIL=you@example.com
-  export ZULIP_API_KEY=your_api_key";
+  [[api]]
+  site = \"https://your-org.zulipchat.com\"
+  email = \"you@example.com\"
+  key = \"your_api_key\"
+
+  For multiple Zulip instances, add more [[api]] entries:
+
+  [[api]]
+  site = \"https://other-org.zulipchat.com\"
+  email = \"you@other.com\"
+  key = \"other_api_key\"
+
+  zulook matches credentials to the URL you provide.
+
+Alternatives:
+  - Place a zuliprc file at ~/zuliprc (single instance only)
+  - Set ZULIP_URL, ZULIP_EMAIL, ZULIP_API_KEY environment variables";
 
 pub const HELP_TEXT: &str = "\
 zulook — read-only access to Zulip conversations.
@@ -84,7 +91,7 @@ Commands:
   mcp                            Run as MCP server (stdio transport)
   acp                            Run as ACP proxy (stdio transport)
 
-Credentials: place a zuliprc file at ~/zuliprc (run `zulook setup` for details).
+Credentials: create ~/.zulookrc with your API keys (run `zulook setup` for details).
 
 Examples:
   zulook https://rust-lang.zulipchat.com/#narrow/stream/213817-t-lang/topic/test
@@ -93,7 +100,7 @@ Examples:
 
 /// Dispatch a command and return the output as a string.
 /// Used by both CLI mode and MCP tool mode.
-pub async fn dispatch(zulip: &ZulipClient, command: &str) -> anyhow::Result<String> {
+pub async fn dispatch(store: &CredentialStore, command: &str) -> anyhow::Result<String> {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     let cmd = tokens.first().copied().unwrap_or("help");
 
@@ -105,7 +112,7 @@ pub async fn dispatch(zulip: &ZulipClient, command: &str) -> anyhow::Result<Stri
         // URLs
         url if url.starts_with("https://") || url.starts_with("http://") => {
             let limit = parse_opt_u32(&tokens[1..], "limit").unwrap_or(100);
-            handle_url(zulip, url, limit).await
+            handle_url(store, url, limit).await
         }
 
         _ => anyhow::bail!(
@@ -115,8 +122,11 @@ pub async fn dispatch(zulip: &ZulipClient, command: &str) -> anyhow::Result<Stri
     }
 }
 
-async fn handle_url(zulip: &ZulipClient, url: &str, limit: u32) -> anyhow::Result<String> {
+async fn handle_url(store: &CredentialStore, url: &str, limit: u32) -> anyhow::Result<String> {
     let parsed = url_parser::parse_zulip_url(url)?;
+
+    let creds = store.resolve(&parsed.base_url)?;
+    let zulip = ZulipClient::new(creds.url, creds.email, creds.api_key);
 
     let mut narrow = Vec::new();
     let label;
