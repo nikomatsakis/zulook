@@ -13,6 +13,7 @@ pub struct ZulipUrl {
     pub stream_name: Option<String>,
     pub topic: Option<String>,
     pub near_message_id: Option<i64>,
+    pub sender: Option<String>,
     /// DM user IDs (from dm/ or pm-with/ operator)
     pub dm_user_ids: Vec<i64>,
 }
@@ -108,6 +109,7 @@ pub fn parse_zulip_url(url_str: &str) -> anyhow::Result<ZulipUrl> {
         stream_name: None,
         topic: None,
         near_message_id: None,
+        sender: None,
         dm_user_ids: Vec::new(),
     };
 
@@ -128,6 +130,9 @@ pub fn parse_zulip_url(url_str: &str) -> anyhow::Result<ZulipUrl> {
             }
             "near" => {
                 result.near_message_id = operand.parse().ok();
+            }
+            "sender" | "from" => {
+                result.sender = Some(operand);
             }
             "dm" | "pm-with" => {
                 result.dm_user_ids = parse_dm_operand(&operand);

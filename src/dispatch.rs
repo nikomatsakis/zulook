@@ -144,9 +144,12 @@ async fn handle_url(store: &CredentialStore, url: &str, limit: u32) -> anyhow::R
     } else if let Some(ref name) = parsed.stream_name {
         narrow.push(Narrow::channel(name));
         label = name.clone();
+    } else if let Some(ref sender) = parsed.sender {
+        narrow.push(Narrow::sender(sender));
+        label = format!("sender {}", sender);
     } else {
         anyhow::bail!(
-            "Could not extract stream or DM from URL. Expected #narrow/stream/..., #narrow/channel/..., or #narrow/dm/..."
+            "Could not extract stream, DM, or sender from URL. Expected #narrow/stream/..., #narrow/channel/..., #narrow/dm/..., or #narrow/sender/..."
         );
     }
 
