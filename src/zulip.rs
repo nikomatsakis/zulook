@@ -75,13 +75,13 @@ impl Narrow {
     }
 
     pub fn sender(sender_operand: &str) -> Self {
-        if let Some(dash_pos) = sender_operand.find('-') {
-            if let Ok(id) = sender_operand[..dash_pos].parse::<i64>() {
-                return Self {
-                    operator: "sender".into(),
-                    operand: serde_json::json!(id),
-                };
-            }
+        if let Some(dash_pos) = sender_operand.find('-')
+            && let Ok(id) = sender_operand[..dash_pos].parse::<i64>()
+        {
+            return Self {
+                operator: "sender".into(),
+                operand: serde_json::json!(id),
+            };
         }
         if let Ok(id) = sender_operand.parse::<i64>() {
             return Self {
