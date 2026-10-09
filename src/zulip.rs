@@ -25,6 +25,31 @@ pub struct Message {
     pub sender_full_name: String,
     #[serde(default)]
     pub subject: String,
+    /// "stream" or "private".
+    #[serde(default, rename = "type")]
+    pub msg_type: String,
+    /// Channel ID (stream messages only).
+    #[serde(default)]
+    pub stream_id: Option<i64>,
+    /// Channel name (string) for stream messages; list of recipients for DMs.
+    #[serde(default)]
+    pub display_recipient: DisplayRecipient,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(untagged)]
+pub enum DisplayRecipient {
+    Channel(String),
+    Users(Vec<Recipient>),
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Recipient {
+    pub id: i64,
+    #[serde(default)]
+    pub full_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,14 +100,13 @@ impl Narrow {
     }
 
     pub fn sender(sender_operand: &str) -> Self {
-        if let Some(dash_pos) = sender_operand.find('-') {
-            if let Ok(id) = sender_operand[..dash_pos].parse::<i64>() {
+        if let Some(dash_pos) = sender_operand.find('-')
+            && let Ok(id) = sender_operand[..dash_pos].parse::<i64>() {
                 return Self {
                     operator: "sender".into(),
                     operand: serde_json::json!(id),
                 };
             }
-        }
         if let Ok(id) = sender_operand.parse::<i64>() {
             return Self {
                 operator: "sender".into(),
