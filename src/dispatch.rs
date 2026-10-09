@@ -5,27 +5,97 @@ use crate::navigation::{
     list_sites, list_topics, narrow_for_url, recent, search,
 };
 use crate::url_parser;
-use crate::zulip::{Message, ZulipClient};
+use crate::zulip::{DisplayRecipient, Message, ZulipClient};
 
-fn format_messages(messages: &[Message]) -> String {
+/// Build the `channel/<id>-<name>` narrow segment the way Zulip's web app does
+/// (spaces in the name become dashes before encoding).
+fn channel_slug(id: i64, name: &str) -> String {
+    format!("{}-{}", id, encode_zulip_operand(&name.replace(' ', "-")))
+}
+
+/// Permalink to a single message, if we have enough recipient info to build one.
+fn message_permalink(base_url: &str, msg: &Message) -> Option<String> {
+    match &msg.display_recipient {
+        Some(DisplayRecipient::Channel(name)) => {
+            let id = msg.stream_id?;
+            if msg.subject.is_empty() {
+                return Some(format!("{base_url}/#narrow/with/{0}/near/{0}", msg.id));
+            }
+            Some(format!(
+                "{}/#narrow/channel/{}/topic/{}/near/{}",
+                base_url,
+                channel_slug(id, name),
+                encode_zulip_operand(&msg.subject),
+                msg.id
+            ))
+        }
+        Some(DisplayRecipient::Dm(users)) => {
+            let ids: Vec<String> = users.iter().map(|u| u.id.to_string()).collect();
+            Some(format!(
+                "{}/#narrow/dm/{}-dm/near/{}",
+                base_url,
+                ids.join(","),
+                msg.id
+            ))
+        }
+        None => None,
+    }
+}
+
+#[derive(Default)]
+struct FormatOptions<'a> {
+    /// Show `#channel > topic` for each message (used when the narrow spans channels).
+    show_channel: bool,
+    /// Append a permalink to each message header. Requires `base_url`.
+    links: bool,
+    base_url: &'a str,
+}
+
+fn format_messages(messages: &[Message], opts: &FormatOptions) -> String {
     let mut out = String::new();
     for msg in messages {
         let dt = chrono::DateTime::from_timestamp(msg.timestamp, 0)
             .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
             .unwrap_or_else(|| msg.timestamp.to_string());
 
-        let topic_prefix = if !msg.subject.is_empty() {
-            format!(" [{}]", msg.subject)
+        let context = match (&msg.display_recipient, opts.show_channel) {
+            (Some(DisplayRecipient::Channel(name)), true) => {
+                format!(" [#{} > {}]", name, msg.subject)
+            }
+            (Some(DisplayRecipient::Dm(users)), true) => {
+                let names: Vec<&str> = users.iter().map(|u| u.full_name.as_str()).collect();
+                format!(" [DM: {}]", names.join(", "))
+            }
+            _ if !msg.subject.is_empty() => format!(" [{}]", msg.subject),
+            _ => String::new(),
+        };
+
+        let link = if opts.links {
+            message_permalink(opts.base_url, msg)
+                .map(|l| format!(" <{}>", l))
+                .unwrap_or_default()
         } else {
             String::new()
         };
 
         out.push_str(&format!(
-            "**{}** ({}){}\n{}\n\n",
-            msg.sender_full_name, dt, topic_prefix, msg.content
+            "**{}** ({}){}{}\n{}\n\n",
+            msg.sender_full_name, dt, context, link, msg.content
         ));
     }
     out
+}
+
+/// True if a boolean flag is present: `name`, `--name`, or `name=true|1|yes`.
+fn has_flag(args: &[&str], name: &str) -> bool {
+    let dashed = format!("--{name}");
+    let prefix = format!("{name}=");
+    args.iter().any(|a| {
+        *a == name
+            || *a == dashed
+            || a.strip_prefix(&prefix)
+                .is_some_and(|v| matches!(v, "true" | "1" | "yes"))
+    })
 }
 
 fn parse_opt_u32(args: &[&str], key: &str) -> Option<u32> {
@@ -291,7 +361,7 @@ pub const HELP_TEXT: &str = "\
 zulook — read-only access to Zulip conversations.
 
 Commands:
-  zulook <conversation_url> [limit=N]                   Fetch nearby messages (default: 100)
+  zulook <conversation_url> [limit=N] [links]           Fetch nearby messages (default: 100)
   zulook sites [format=json]                             List configured Zulip sites
   zulook channels <site_url> [name words] [format=json] List accessible channels
   zulook topics <channel_url> [name words] [format=json] List topics in a channel
@@ -313,10 +383,13 @@ Follow the result URLs to read nearby messages. Use before=ID to page to older m
 Run `zulook search` for search-specific help.
 Run `zulook recent` or `zulook dms` for scanning and DM discovery help.
 Reading messages does not mark them read.
+Sender narrows span conversations, so each message is labeled with its channel/topic or DM.
+Add links to append a permalink to each message (also accepts --links or links=true).
 
 Credentials: create ~/.zulookrc with your API keys (run `zulook setup` for details).
 
 Examples:
+  zulook https://rust-lang.zulipchat.com/#narrow/sender/116883-tmandry limit=200 links
   zulook channels https://rust-lang.zulipchat.com rust
   zulook topics https://rust-lang.zulipchat.com/#narrow/channel/213817-t-lang
   zulook dms https://rust-lang.zulipchat.com
@@ -479,14 +552,20 @@ pub async fn dispatch(store: &CredentialStore, command: &str) -> anyhow::Result<
         // URLs
         url if url.starts_with("https://") || url.starts_with("http://") => {
             let limit = parse_opt_u32(&tokens[1..], "limit").unwrap_or(100);
-            handle_url(store, url, limit).await
+            let links = has_flag(&tokens[1..], "links");
+            handle_url(store, url, limit, links).await
         }
 
         _ => anyhow::bail!("Unknown command. Use 'help' to see usage."),
     }
 }
 
-async fn handle_url(store: &CredentialStore, url: &str, limit: u32) -> anyhow::Result<String> {
+async fn handle_url(
+    store: &CredentialStore,
+    url: &str,
+    limit: u32,
+    links: bool,
+) -> anyhow::Result<String> {
     let parsed = url_parser::parse_zulip_url(url)?;
 
     let creds = store.resolve(&parsed.base_url)?;
@@ -534,11 +613,18 @@ async fn handle_url(store: &CredentialStore, url: &str, limit: u32) -> anyhow::R
     let mut messages = data.messages;
     messages.sort_by_key(|m| m.timestamp);
 
+    let opts = FormatOptions {
+        // Narrows not scoped to a single channel/DM span conversations, so label each message.
+        show_channel: !parsed.is_dm() && parsed.stream_id.is_none() && parsed.stream_name.is_none(),
+        links,
+        base_url: &parsed.base_url,
+    };
+
     let mut out = format!(
         "Messages from {}{}:\n\n{}",
         label,
         topic_label,
-        format_messages(&messages)
+        format_messages(&messages, &opts)
     );
 
     // Build context URLs using first/last message IDs
@@ -562,7 +648,11 @@ async fn handle_url(store: &CredentialStore, url: &str, limit: u32) -> anyhow::R
             }
             p
         } else if let Some(ref sender) = parsed.sender {
-            format!("sender/{}", encode_zulip_operand(sender))
+            let mut p = format!("sender/{}", encode_zulip_operand(sender));
+            if let Some(ref topic) = parsed.topic {
+                p.push_str(&format!("/topic/{}", encode_zulip_operand(topic)));
+            }
+            p
         } else {
             String::new()
         };
@@ -585,6 +675,184 @@ async fn handle_url(store: &CredentialStore, url: &str, limit: u32) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::zulip::DmParticipant;
+
+    fn stream_msg() -> Message {
+        Message {
+            id: 555,
+            timestamp: 1_790_000_000,
+            content: "hello".into(),
+            sender_full_name: "Tyler Mandry".into(),
+            subject: "Triage meeting 2026-09-23".into(),
+            msg_type: "stream".into(),
+            stream_id: Some(410673),
+            display_recipient: Some(DisplayRecipient::Channel("t-lang/meetings".into())),
+            flags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn default_output_has_no_links() {
+        let out = format_messages(&[stream_msg()], &FormatOptions::default());
+        assert!(out.contains("[Triage meeting 2026-09-23]"));
+        assert!(!out.contains("#narrow"));
+        assert!(!out.contains("t-lang/meetings"));
+    }
+
+    #[test]
+    fn show_channel_labels_channel_and_topic() {
+        let opts = FormatOptions {
+            show_channel: true,
+            ..Default::default()
+        };
+        let out = format_messages(&[stream_msg()], &opts);
+        assert!(out.contains("[#t-lang/meetings > Triage meeting 2026-09-23]"));
+    }
+
+    #[test]
+    fn links_flag_appends_permalink() {
+        let opts = FormatOptions {
+            links: true,
+            base_url: "https://rust-lang.zulipchat.com",
+            ..Default::default()
+        };
+        let out = format_messages(&[stream_msg()], &opts);
+        assert!(out.contains(
+            "<https://rust-lang.zulipchat.com/#narrow/channel/410673-t-lang.2Fmeetings/topic/Triage.20meeting.202026-09-23/near/555>"
+        ));
+    }
+
+    #[test]
+    fn dm_permalink() {
+        let msg = Message {
+            msg_type: "private".into(),
+            stream_id: None,
+            subject: String::new(),
+            display_recipient: Some(DisplayRecipient::Dm(vec![
+                DmParticipant {
+                    id: 1,
+                    full_name: "A".into(),
+                },
+                DmParticipant {
+                    id: 2,
+                    full_name: "B".into(),
+                },
+            ])),
+            ..stream_msg()
+        };
+        let p = message_permalink("https://x.zulipchat.com", &msg).unwrap();
+        assert_eq!(p, "https://x.zulipchat.com/#narrow/dm/1,2-dm/near/555");
+    }
+
+    #[test]
+    fn empty_topic_permalink_identifies_the_conversation() {
+        let msg = Message {
+            subject: String::new(),
+            ..stream_msg()
+        };
+        let permalink = message_permalink("https://example.com", &msg).unwrap();
+        let parsed = url_parser::parse_zulip_url(&permalink).unwrap();
+        assert_eq!(parsed.with_message_id, Some(msg.id));
+        assert_eq!(parsed.near_message_id, Some(msg.id));
+        assert_eq!(
+            serde_json::to_value(narrow_for_url(&parsed).unwrap()).unwrap(),
+            serde_json::json!([{"operator": "with", "operand": msg.id}])
+        );
+    }
+
+    #[tokio::test]
+    async fn sender_paging_preserves_topic_filter() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for topic in [None, Some("triage"), Some("café & tea")] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let site = format!("http://{}", listener.local_addr().unwrap());
+            let store = CredentialStore::for_test(site.clone());
+            let topic_path = topic
+                .map(|topic| format!("/topic/{}", encode_zulip_operand(topic)))
+                .unwrap_or_default();
+            let conversation = format!("{site}/#narrow/sender/42-Alice{topic_path}");
+            let parsed = url_parser::parse_zulip_url(&conversation).unwrap();
+            let expected_narrow = serde_json::to_value(narrow_for_url(&parsed).unwrap()).unwrap();
+            let first = Message {
+                subject: topic.unwrap_or("another topic").to_string(),
+                ..stream_msg()
+            };
+            let last = Message {
+                id: 556,
+                timestamp: first.timestamp + 1,
+                ..first.clone()
+            };
+            let body = serde_json::json!({"messages": [first, last]}).to_string();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert!(count > 0, "request closed before headers were received");
+                    request.extend_from_slice(&chunk[..count]);
+                    if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                String::from_utf8(request).unwrap()
+            });
+
+            let output = dispatch(&store, &format!("{conversation} links"))
+                .await
+                .unwrap();
+            let request = server.await.unwrap();
+            let path = request.split_whitespace().nth(1).unwrap();
+            let request_url = url::Url::parse(&format!("{site}{path}")).unwrap();
+            let narrow_json = request_url
+                .query_pairs()
+                .find(|(key, _)| key == "narrow")
+                .unwrap()
+                .1;
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&narrow_json).unwrap(),
+                expected_narrow
+            );
+            for (label, anchor) in [("Older: ", 555), ("Newer: ", 556)] {
+                let paging_url = output
+                    .lines()
+                    .find_map(|line| line.strip_prefix(label))
+                    .unwrap();
+                let parsed = url_parser::parse_zulip_url(paging_url).unwrap();
+                assert_eq!(parsed.sender.as_deref(), Some("42-Alice"));
+                assert_eq!(parsed.topic.as_deref(), topic);
+                assert_eq!(parsed.near_message_id, Some(anchor));
+                assert_eq!(
+                    serde_json::to_value(narrow_for_url(&parsed).unwrap()).unwrap(),
+                    expected_narrow,
+                    "Paging URL changed the filters: {paging_url}"
+                );
+            }
+            assert!(output.contains("[#t-lang/meetings > "));
+            assert!(output.contains("/near/555>"));
+            assert!(output.contains("/near/556>"));
+        }
+    }
+
+    #[test]
+    fn channel_slug_replaces_spaces() {
+        assert_eq!(channel_slug(7, "project leads"), "7-project-leads");
+    }
+
+    #[test]
+    fn flag_forms() {
+        assert!(has_flag(&["links"], "links"));
+        assert!(has_flag(&["limit=5", "--links"], "links"));
+        assert!(has_flag(&["links=true"], "links"));
+        assert!(!has_flag(&["links=false"], "links"));
+        assert!(!has_flag(&["limit=5"], "links"));
+    }
 
     #[test]
     fn test_search_args() {

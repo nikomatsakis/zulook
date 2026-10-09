@@ -46,7 +46,7 @@ export ZULIP_API_KEY=your_api_key
 ### CLI
 
 ```
-zulook <url> [limit=N]
+zulook <url> [limit=N] [links]
 zulook sites [format=json]
 zulook channels <site_url> [name words] [format=json]
 zulook topics <channel_url> [name words] [format=json]
@@ -69,6 +69,8 @@ zulook https://rust-lang.zulipchat.com/#narrow/stream/213817-t-lang/topic/test l
 ```
 
 The output includes **Older** and **Newer** URLs for paging through history. Run `zulook sites` to discover configured instances.
+
+Sender narrows label each message with its channel and topic or DM participants. Add `links` (also `--links` or `links=true`) to include a permalink for each message.
 
 Use `channels` to discover visible channels by name or description. Use `topics` to list a channel's topics in recent activity order. Both include URLs that can be passed back to `zulook`. The optional name words filter matches without regard to case.
 
