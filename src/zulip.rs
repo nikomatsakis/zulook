@@ -25,11 +25,56 @@ pub struct Message {
     pub sender_full_name: String,
     #[serde(default)]
     pub subject: String,
+    #[serde(default)]
+    pub stream_id: Option<i64>,
+    #[serde(default)]
+    pub display_recipient: Option<DisplayRecipient>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(untagged)]
+pub enum DisplayRecipient {
+    Channel(String),
+    Dm(Vec<DmParticipant>),
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct DmParticipant {
+    pub id: i64,
+    pub full_name: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct MessagesData {
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub found_oldest: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StreamsData {
+    pub streams: Vec<Stream>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Stream {
+    pub stream_id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub invite_only: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TopicsData {
+    pub topics: Vec<Topic>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Topic {
+    pub name: String,
+    pub max_id: i64,
 }
 
 // --- Narrow filter construction ---
@@ -38,28 +83,29 @@ pub struct MessagesData {
 pub struct Narrow {
     pub operator: String,
     pub operand: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negated: Option<bool>,
 }
 
 impl Narrow {
-    pub fn channel(name: &str) -> Self {
+    fn new(operator: &str, operand: serde_json::Value) -> Self {
         Self {
-            operator: "channel".into(),
-            operand: serde_json::Value::String(name.into()),
+            operator: operator.into(),
+            operand,
+            negated: None,
         }
+    }
+
+    pub fn channel(name: &str) -> Self {
+        Self::new("channel", serde_json::json!(name))
     }
 
     pub fn channel_id(id: i64) -> Self {
-        Self {
-            operator: "channel".into(),
-            operand: serde_json::json!(id),
-        }
+        Self::new("channel", serde_json::json!(id))
     }
 
     pub fn topic(name: &str) -> Self {
-        Self {
-            operator: "topic".into(),
-            operand: serde_json::Value::String(name.into()),
-        }
+        Self::new("topic", serde_json::json!(name))
     }
 
     pub fn dm(user_ids: &[i64]) -> Self {
@@ -68,31 +114,39 @@ impl Narrow {
         } else {
             serde_json::json!(user_ids)
         };
-        Self {
-            operator: "dm".into(),
-            operand,
+        Self::new("dm", operand)
+    }
+
+    pub fn with_message(id: i64) -> Self {
+        Self::new("with", serde_json::json!(id))
+    }
+
+    pub fn search(query: &str) -> Self {
+        Self::new("search", serde_json::json!(query))
+    }
+
+    pub fn is_dm(negated: bool) -> Self {
+        let mut narrow = Self::new("is", serde_json::json!("dm"));
+        if negated {
+            narrow.negated = Some(true);
         }
+        narrow
+    }
+
+    pub fn public_channels() -> Self {
+        Self::new("channels", serde_json::json!("public"))
     }
 
     pub fn sender(sender_operand: &str) -> Self {
-        if let Some(dash_pos) = sender_operand.find('-') {
-            if let Ok(id) = sender_operand[..dash_pos].parse::<i64>() {
-                return Self {
-                    operator: "sender".into(),
-                    operand: serde_json::json!(id),
-                };
-            }
+        if let Some(dash_pos) = sender_operand.find('-')
+            && let Ok(id) = sender_operand[..dash_pos].parse::<i64>()
+        {
+            return Self::new("sender", serde_json::json!(id));
         }
         if let Ok(id) = sender_operand.parse::<i64>() {
-            return Self {
-                operator: "sender".into(),
-                operand: serde_json::json!(id),
-            };
+            return Self::new("sender", serde_json::json!(id));
         }
-        Self {
-            operator: "sender".into(),
-            operand: serde_json::Value::String(sender_operand.into()),
-        }
+        Self::new("sender", serde_json::json!(sender_operand))
     }
 }
 
@@ -141,6 +195,7 @@ impl ZulipClient {
         num_before: u32,
         num_after: u32,
         apply_markdown: bool,
+        include_anchor: bool,
     ) -> anyhow::Result<MessagesData> {
         let narrow_json = serde_json::to_string(&narrow)?;
         let resp: ApiResponse<MessagesData> = self
@@ -152,7 +207,24 @@ impl ZulipClient {
                     ("num_before", num_before.to_string()),
                     ("num_after", num_after.to_string()),
                     ("apply_markdown", apply_markdown.to_string()),
+                    ("include_anchor", include_anchor.to_string()),
+                    ("allow_empty_topic_name", "true".to_string()),
                 ],
+            )
+            .await?;
+        Ok(resp.data)
+    }
+
+    pub async fn get_streams(&self) -> anyhow::Result<StreamsData> {
+        let resp: ApiResponse<StreamsData> = self.get("/streams", &[]).await?;
+        Ok(resp.data)
+    }
+
+    pub async fn get_stream_topics(&self, stream_id: i64) -> anyhow::Result<TopicsData> {
+        let resp: ApiResponse<TopicsData> = self
+            .get(
+                &format!("/users/me/{stream_id}/topics"),
+                &[("allow_empty_topic_name", "true".to_string())],
             )
             .await?;
         Ok(resp.data)

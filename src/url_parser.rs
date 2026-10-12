@@ -13,6 +13,7 @@ pub struct ZulipUrl {
     pub stream_name: Option<String>,
     pub topic: Option<String>,
     pub near_message_id: Option<i64>,
+    pub with_message_id: Option<i64>,
     pub sender: Option<String>,
     /// DM user IDs (from dm/ or pm-with/ operator)
     pub dm_user_ids: Vec<i64>,
@@ -20,35 +21,25 @@ pub struct ZulipUrl {
 
 /// Decode Zulip's custom URL encoding: `.XX` → `%XX` → decoded char.
 fn decode_zulip_operand(encoded: &str) -> String {
-    let mut result = String::new();
-    let mut chars = encoded.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '.' {
-            let mut hex = String::new();
-            if let Some(&h1) = chars.peek() {
-                hex.push(h1);
-                chars.next();
-            }
-            if let Some(&h2) = chars.peek() {
-                hex.push(h2);
-                chars.next();
-            }
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
-                } else {
-                    result.push('.');
-                    result.push_str(&hex);
-                }
-            } else {
-                result.push('.');
-                result.push_str(&hex);
-            }
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'.'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            )
+        {
+            decoded.push(((hi << 4) | lo) as u8);
+            i += 3;
         } else {
-            result.push(ch);
+            decoded.push(bytes[i]);
+            i += 1;
         }
     }
-    result
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 /// Parse a stream operand like "213817-t-lang" into (Some(213817), "t-lang").
@@ -64,7 +55,7 @@ fn parse_stream_operand(operand: &str) -> (Option<i64>, Option<String>) {
     if let Ok(id) = operand.parse::<i64>() {
         return (Some(id), None);
     }
-    (None, Some(operand.replace('-', " ")))
+    (None, Some(operand.to_string()))
 }
 
 /// Parse a DM operand like "12345-User-Name" or "12345,67890-Group".
@@ -93,7 +84,11 @@ fn parse_dm_operand(operand: &str) -> Vec<i64> {
 pub fn parse_zulip_url(url_str: &str) -> anyhow::Result<ZulipUrl> {
     let parsed = url::Url::parse(url_str)?;
 
-    let base_url = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
+    anyhow::ensure!(
+        matches!(parsed.scheme(), "https" | "http") && parsed.host_str().is_some(),
+        "Expected an HTTP(S) Zulip URL"
+    );
+    let base_url = parsed.origin().ascii_serialization();
 
     let fragment = parsed.fragment().unwrap_or("");
 
@@ -109,6 +104,7 @@ pub fn parse_zulip_url(url_str: &str) -> anyhow::Result<ZulipUrl> {
         stream_name: None,
         topic: None,
         near_message_id: None,
+        with_message_id: None,
         sender: None,
         dm_user_ids: Vec::new(),
     };
@@ -130,6 +126,9 @@ pub fn parse_zulip_url(url_str: &str) -> anyhow::Result<ZulipUrl> {
             }
             "near" => {
                 result.near_message_id = operand.parse().ok();
+            }
+            "with" => {
+                result.with_message_id = operand.parse().ok();
             }
             "sender" | "from" => {
                 result.sender = Some(operand);
@@ -194,6 +193,28 @@ mod tests {
             parse_zulip_url("https://example.zulipchat.com/#narrow/stream/1-test/topic/my.2Etopic")
                 .unwrap();
         assert_eq!(url.topic.as_deref(), Some("my.topic"));
+    }
+
+    #[test]
+    fn test_unicode_topic() {
+        let url = parse_zulip_url(
+            "https://example.zulipchat.com/#narrow/channel/1-test/topic/caf.C3.A9.20.26.20tea",
+        )
+        .unwrap();
+        assert_eq!(url.topic.as_deref(), Some("café & tea"));
+    }
+
+    #[test]
+    fn test_with_message_url() {
+        let url = parse_zulip_url("https://example.zulipchat.com/#narrow/with/42/near/42").unwrap();
+        assert_eq!(url.with_message_id, Some(42));
+        assert_eq!(url.near_message_id, Some(42));
+    }
+
+    #[test]
+    fn test_bare_channel_name_with_hyphen() {
+        let url = parse_zulip_url("https://example.zulipchat.com/#narrow/channel/t-lang").unwrap();
+        assert_eq!(url.stream_name.as_deref(), Some("t-lang"));
     }
 
     #[test]

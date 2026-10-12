@@ -1,8 +1,8 @@
 # zulook
 
-Read-only access to Zulip conversations. Works as a CLI, an MCP server, or an ACP proxy.
+Read-only access to Zulip conversations, channels, topics, and search. Works as a CLI, an MCP server, or an ACP proxy.
 
-Give it a Zulip URL, get back the messages. That's it.
+Give it a Zulip URL to read messages, or browse and search from a site URL.
 
 ```
 $ zulook https://rust-lang.zulipchat.com/#narrow/stream/213817-t-lang/topic/test
@@ -47,6 +47,10 @@ export ZULIP_API_KEY=your_api_key
 
 ```
 zulook <url> [limit=N]
+zulook sites [format=json]
+zulook channels <site_url> [name words] [format=json]
+zulook topics <channel_url> [name words] [format=json]
+zulook search <site_or_conversation_url> <query words> [scope=all|channels|dms|public] [limit=N] [before=ID] [format=json]
 ```
 
 Pass any Zulip URL — streams, topics, DMs, group DMs, with or without `/near/` anchors. Default limit is 100 messages.
@@ -62,7 +66,26 @@ zulook https://rust-lang.zulipchat.com/#narrow/dm/116009,116107-dm/near/57234873
 zulook https://rust-lang.zulipchat.com/#narrow/stream/213817-t-lang/topic/test limit=20
 ```
 
-The output includes **Older** and **Newer** URLs for paging through history.
+The output includes **Older** and **Newer** URLs for paging through history. Run `zulook sites` to discover configured instances.
+
+Use `channels` to discover visible channels by name or description. Use `topics` to list a channel's topics in recent activity order. Both include URLs that can be passed back to `zulook`. The optional name words filter matches without regard to case.
+
+```
+zulook channels https://rust-lang.zulipchat.com compiler
+zulook topics https://rust-lang.zulipchat.com/#narrow/channel/213817-t-lang async
+```
+
+Use `search` to find messages. A site URL searches your message history across subscribed channels and DMs. `scope=channels` or `scope=dms` limits that history; `scope=public` searches accessible public channel history, including channels you have not joined. A channel, topic, or DM URL limits search to that conversation.
+
+The URL is required as the first argument. Query words follow it. `scope=public` is a special option, not a query word; use it only with a site URL. Run `zulook search` or `zulook help search` for search-specific help.
+
+```
+zulook search https://rust-lang.zulipchat.com async drop scope=public limit=20
+zulook search https://rust-lang.zulipchat.com/#narrow/channel/213817-t-lang trait solver
+zulook search https://rust-lang.zulipchat.com/#narrow/dm/116009,116107-dm meeting
+```
+
+Search results are newest first and include a message URL. If the response gives a `before=ID` cursor, repeat the same search with that option to get older results. `format=json` returns structured data for scripts. The default search limit is 50; the maximum is 1000.
 
 ### MCP server
 
@@ -70,7 +93,17 @@ The output includes **Older** and **Newer** URLs for paging through history.
 zulook mcp
 ```
 
-Runs as an MCP server over stdio. Exposes a single `zulip` tool — give it a URL or `"help"`.
+Runs as an MCP server over stdio. Exposes five tools:
+
+| Tool | Input | Result |
+| --- | --- | --- |
+| `zulip` | A command string, including a conversation URL or `"help"` | Formatted text |
+| `zulip_sites` | `{}` | Configured site URLs |
+| `zulip_channels` | `site`, optional `filter` | Structured channel list |
+| `zulip_topics` | `channel`, optional `filter` | Structured topic list |
+| `zulip_search` | `url`, `query`, optional `scope`, `limit`, `before` | Structured search hits and `next_before` cursor |
+
+The same tools are available through the ACP proxy.
 
 Claude Code config (`~/.claude/settings.json`):
 ```json
@@ -94,9 +127,7 @@ Runs as an ACP proxy over stdio, for use with an ACP conductor.
 
 ## How it works
 
-zulook parses Zulip narrow URLs to extract the stream/channel, topic, DM participants, and message anchor from the URL fragment. It then calls the Zulip REST API (`GET /api/v1/messages`) with the corresponding narrow filters and returns formatted messages.
-
-The URL is the only interface. There's one tool, one command pattern, and pagination is just following URLs — the same ones you'd see in your browser.
+zulook parses Zulip narrow URLs to extract the channel, topic, DM participants, and message anchor from the URL fragment. It reads channels via `GET /api/v1/streams`, topics via `GET /api/v1/users/me/{stream_id}/topics`, and messages and search results via `GET /api/v1/messages` with narrow filters. Search and navigation only return data your Zulip credentials can access.
 
 ## Building
 

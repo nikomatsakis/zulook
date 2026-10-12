@@ -1,5 +1,6 @@
 mod config;
 mod dispatch;
+mod navigation;
 mod proxy;
 mod url_parser;
 mod zulip;

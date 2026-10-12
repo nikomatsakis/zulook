@@ -72,8 +72,10 @@ impl CredentialStore {
             }
         }
 
-        // 2. ~/zuliprc: use unconditionally (single-instance assumption)
-        if let Some(ref creds) = self.zuliprc {
+        // 2. ~/zuliprc: match the configured single instance
+        if let Some(ref creds) = self.zuliprc
+            && normalized.eq_ignore_ascii_case(creds.url.trim_end_matches('/'))
+        {
             return Ok(ZulipCredentials {
                 url: creds.url.clone(),
                 email: creds.email.clone(),
@@ -81,8 +83,10 @@ impl CredentialStore {
             });
         }
 
-        // 3. Env vars: use unconditionally
-        if let Some(ref creds) = self.env {
+        // 3. Env vars: match the configured single instance
+        if let Some(ref creds) = self.env
+            && normalized.eq_ignore_ascii_case(creds.url.trim_end_matches('/'))
+        {
             return Ok(ZulipCredentials {
                 url: creds.url.clone(),
                 email: creds.email.clone(),
@@ -96,6 +100,52 @@ impl CredentialStore {
              - Place a zuliprc file at ~/zuliprc\n\
              - Set ZULIP_URL, ZULIP_EMAIL, ZULIP_API_KEY environment variables"
         )
+    }
+
+    /// List configured Zulip sites without exposing credential values.
+    pub fn sites(&self) -> Vec<String> {
+        let mut sites: Vec<String> = self
+            .zulookrc_entries
+            .iter()
+            .map(|entry| entry.site.trim_end_matches('/').to_string())
+            .collect();
+        if let Some(creds) = &self.zuliprc {
+            sites.push(creds.url.trim_end_matches('/').to_string());
+        }
+        if let Some(creds) = &self.env {
+            sites.push(creds.url.trim_end_matches('/').to_string());
+        }
+        sites.sort_by_key(|site| site.to_lowercase());
+        sites.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        sites
+    }
+}
+
+#[cfg(test)]
+impl CredentialStore {
+    pub fn for_test(url: String) -> Self {
+        Self {
+            zulookrc_entries: Vec::new(),
+            zuliprc: None,
+            env: Some(ZulipCredentials {
+                url,
+                email: "test@example.com".to_string(),
+                api_key: "test-key".to_string(),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_single_site_credentials_match_requested_site() {
+        let store = CredentialStore::for_test("https://example.zulipchat.com".to_string());
+        assert!(store.resolve("https://example.zulipchat.com").is_ok());
+        assert!(store.resolve("https://other.zulipchat.com").is_err());
+        assert_eq!(store.sites(), vec!["https://example.zulipchat.com"]);
     }
 }
 
