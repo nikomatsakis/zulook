@@ -8,8 +8,9 @@ use serde::Deserialize;
 
 use crate::config::CredentialStore;
 use crate::navigation::{
-    ChannelsOutput, SearchOutput, SearchRequest, SearchScope, SitesOutput, TopicsOutput,
-    list_channels, list_sites, list_topics, search,
+    ChannelsOutput, DmsOutput, DmsRequest, RecentOutput, RecentRequest, RecentScope, SearchOutput,
+    SearchRequest, SearchScope, SitesOutput, TopicsOutput, list_channels, list_dms, list_sites,
+    list_topics, recent, search,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -59,7 +60,7 @@ impl<R: Role> McpTool<R> for ZulipTool {
     }
 
     fn description(&self) -> String {
-        "Read Zulip conversations by URL; also accepts channels, topics, and search commands. Use \"help\" for syntax.".to_string()
+        "Read Zulip conversations by URL; also accepts channels, topics, dms, recent, and search commands. Use \"help\" for syntax.".to_string()
     }
 
     async fn call_tool(
@@ -194,19 +195,138 @@ impl<R: Role> McpTool<R> for SearchTool {
     }
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RecentInput {
+    /// Zulip site URL for your combined history, or a channel, topic, or DM URL. Starts with newest messages even if the URL has a near anchor.
+    url: String,
+    /// For site-wide scans: all (default), channels, or dms. Omit for a conversation URL.
+    #[serde(default)]
+    scope: RecentScope,
+    /// Return only messages you have not read. Reading with this tool does not mark them read.
+    #[serde(default)]
+    unread_only: bool,
+    /// Return only messages that mention you, including group and wildcard mentions.
+    #[serde(default)]
+    mentions_only: bool,
+    /// Maximum messages, from 1 to 1000. Defaults to 50.
+    limit: Option<u32>,
+    /// Continue to older messages using next_before, keeping the same filters.
+    before: Option<i64>,
+}
+
+struct RecentTool {
+    store: Arc<CredentialStore>,
+}
+
+impl<R: Role> McpTool<R> for RecentTool {
+    type Input = RecentInput;
+    type Output = RecentOutput;
+
+    fn name(&self) -> String {
+        "zulip_recent".to_string()
+    }
+
+    fn description(&self) -> String {
+        "Scan recent Zulip messages without search keywords, newest first. Use scope=dms for direct messages, unread_only for unread messages, or mentions_only for mentions of you; both filters can be combined. Returns content, senders, locations, timestamps, personal flags, message URLs, and an older-message cursor. Does not mark messages read.".to_string()
+    }
+
+    async fn call_tool(
+        &self,
+        input: RecentInput,
+        _cx: McpConnectionTo<R>,
+    ) -> Result<RecentOutput, sacp::Error> {
+        recent(
+            &self.store,
+            RecentRequest {
+                url: input.url,
+                scope: input.scope,
+                unread_only: input.unread_only,
+                mentions_only: input.mentions_only,
+                limit: input.limit.unwrap_or(50),
+                before: input.before,
+            },
+        )
+        .await
+        .map_err(tool_error)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DmsInput {
+    /// Zulip site URL, for example https://example.zulipchat.com.
+    site: String,
+    /// Optional case-insensitive substring of a participant's name.
+    filter: Option<String>,
+    /// Maximum conversations, from 1 to 1000. Defaults to 50.
+    limit: Option<u32>,
+    /// Continue within the recent subset using next_before, keeping the same filter.
+    before: Option<i64>,
+}
+
+struct DmsTool {
+    store: Arc<CredentialStore>,
+}
+
+impl<R: Role> McpTool<R> for DmsTool {
+    type Input = DmsInput;
+    type Output = DmsOutput;
+
+    fn name(&self) -> String {
+        "zulip_dms".to_string()
+    }
+
+    fn description(&self) -> String {
+        "Discover recent one-to-one and group DM conversations, newest activity first, with participant IDs, names, latest message IDs, and conversation URLs. Zulip returns a recent subset, not a complete history; use zulip_recent with scope=dms to scan older messages. Pass a returned URL to zulip or zulip_recent to read that conversation.".to_string()
+    }
+
+    async fn call_tool(
+        &self,
+        input: DmsInput,
+        _cx: McpConnectionTo<R>,
+    ) -> Result<DmsOutput, sacp::Error> {
+        list_dms(
+            &self.store,
+            DmsRequest {
+                site: input.site,
+                filter: input.filter,
+                limit: input.limit.unwrap_or(50),
+                before: input.before,
+            },
+        )
+        .await
+        .map_err(tool_error)
+    }
+}
+
 fn tool_error(error: anyhow::Error) -> sacp::Error {
     sacp::Error::internal_error().data(error.to_string())
 }
 
+const SERVER_INSTRUCTIONS: &str = "Read-only Zulip MCP server. Use zulip_sites to find configured instances, zulip_recent to scan recent messages without keywords (scope=dms for DMs, unread_only or mentions_only to triage), zulip_dms to discover recent DM conversations, zulip_channels to discover channels, zulip_topics to browse topics, zulip_search to search messages, and zulip to read a conversation URL. Reading does not mark messages read. Recent DM discovery is a subset; use zulip_recent with scope=dms and next_before to scan older DM history.";
+
 pub async fn run_mcp(store: CredentialStore) -> anyhow::Result<()> {
     let store = Arc::new(store);
     let server = McpServer::<role::mcp::Client, _>::builder("zulook")
-        .instructions("Read-only Zulip MCP server. Use zulip_sites to find configured instances, zulip_channels to discover channels, zulip_topics to browse topics, zulip_search to search messages, and zulip to read a conversation URL.")
-        .tool(ZulipTool { store: store.clone() })
-        .tool(SitesTool { store: store.clone() })
-        .tool(ChannelsTool { store: store.clone() })
-        .tool(TopicsTool { store: store.clone() })
-        .tool(SearchTool { store })
+        .instructions(SERVER_INSTRUCTIONS)
+        .tool(ZulipTool {
+            store: store.clone(),
+        })
+        .tool(SitesTool {
+            store: store.clone(),
+        })
+        .tool(ChannelsTool {
+            store: store.clone(),
+        })
+        .tool(TopicsTool {
+            store: store.clone(),
+        })
+        .tool(SearchTool {
+            store: store.clone(),
+        })
+        .tool(RecentTool {
+            store: store.clone(),
+        })
+        .tool(DmsTool { store })
         .build();
 
     ConnectTo::<role::mcp::Client>::connect_to(server, sacp_tokio::Stdio::new())
@@ -219,12 +339,26 @@ pub async fn run_mcp(store: CredentialStore) -> anyhow::Result<()> {
 pub async fn run_acp(store: CredentialStore) -> anyhow::Result<()> {
     let store = Arc::new(store);
     let server = McpServer::<Conductor, _>::builder("zulook")
-        .instructions("Read-only Zulip MCP server. Use zulip_sites to find configured instances, zulip_channels to discover channels, zulip_topics to browse topics, zulip_search to search messages, and zulip to read a conversation URL.")
-        .tool(ZulipTool { store: store.clone() })
-        .tool(SitesTool { store: store.clone() })
-        .tool(ChannelsTool { store: store.clone() })
-        .tool(TopicsTool { store: store.clone() })
-        .tool(SearchTool { store })
+        .instructions(SERVER_INSTRUCTIONS)
+        .tool(ZulipTool {
+            store: store.clone(),
+        })
+        .tool(SitesTool {
+            store: store.clone(),
+        })
+        .tool(ChannelsTool {
+            store: store.clone(),
+        })
+        .tool(TopicsTool {
+            store: store.clone(),
+        })
+        .tool(SearchTool {
+            store: store.clone(),
+        })
+        .tool(RecentTool {
+            store: store.clone(),
+        })
+        .tool(DmsTool { store })
         .build();
 
     Proxy
