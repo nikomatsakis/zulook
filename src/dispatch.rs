@@ -1,7 +1,8 @@
 use crate::config::CredentialStore;
 use crate::navigation::{
-    ChannelsOutput, SearchOutput, SearchRequest, SearchScope, TopicsOutput, encode_zulip_operand,
-    list_channels, list_sites, list_topics, narrow_for_url, search,
+    ChannelsOutput, DmsOutput, DmsRequest, RecentOutput, RecentRequest, RecentScope, SearchOutput,
+    SearchRequest, SearchScope, TopicsOutput, encode_zulip_operand, list_channels, list_dms,
+    list_sites, list_topics, narrow_for_url, recent, search,
 };
 use crate::url_parser;
 use crate::zulip::{Message, ZulipClient};
@@ -86,6 +87,65 @@ fn search_args(url: &str, args: &[&str]) -> anyhow::Result<(SearchRequest, bool)
     ))
 }
 
+fn recent_args(url: &str, args: &[&str]) -> anyhow::Result<(RecentRequest, bool)> {
+    let mut request = RecentRequest {
+        url: url.to_string(),
+        scope: RecentScope::All,
+        unread_only: false,
+        mentions_only: false,
+        limit: 50,
+        before: None,
+    };
+    let mut json = false;
+    for arg in args {
+        if let Some(value) = arg.strip_prefix("scope=") {
+            request.scope = value.parse()?;
+        } else if let Some(value) = arg.strip_prefix("unread_only=") {
+            request.unread_only = value.parse()?;
+        } else if let Some(value) = arg.strip_prefix("mentions_only=") {
+            request.mentions_only = value.parse()?;
+        } else if let Some(value) = arg.strip_prefix("limit=") {
+            request.limit = value.parse()?;
+        } else if let Some(value) = arg.strip_prefix("before=") {
+            request.before = Some(value.parse()?);
+        } else if let Some(value) = arg.strip_prefix("format=") {
+            json = parse_format(value)?;
+        } else {
+            anyhow::bail!("Unknown recent option '{arg}'.\n\n{RECENT_HELP}");
+        }
+    }
+    Ok((request, json))
+}
+
+fn dms_args(site: &str, args: &[&str]) -> anyhow::Result<(DmsRequest, bool)> {
+    let mut words = Vec::new();
+    let mut limit = 50;
+    let mut before = None;
+    let mut json = false;
+    for arg in args {
+        if let Some(value) = arg.strip_prefix("limit=") {
+            limit = value.parse()?;
+        } else if let Some(value) = arg.strip_prefix("before=") {
+            before = Some(value.parse()?);
+        } else if let Some(value) = arg.strip_prefix("format=") {
+            json = parse_format(value)?;
+        } else if arg.contains('=') {
+            anyhow::bail!("Unknown dms option '{arg}'.\n\n{DMS_HELP}");
+        } else {
+            words.push(*arg);
+        }
+    }
+    Ok((
+        DmsRequest {
+            site: site.to_string(),
+            filter: (!words.is_empty()).then(|| words.join(" ")),
+            limit,
+            before,
+        },
+        json,
+    ))
+}
+
 fn format_channels(data: &ChannelsOutput) -> String {
     if data.channels.is_empty() {
         return "No channels found.".to_string();
@@ -145,6 +205,60 @@ fn format_search(data: &SearchOutput) -> String {
     out
 }
 
+fn format_recent(data: &RecentOutput) -> String {
+    if data.messages.is_empty() {
+        return "No messages found for these filters.".to_string();
+    }
+    let mut out = "Recent messages (newest first):\n\n".to_string();
+    for hit in &data.messages {
+        let message = &hit.message;
+        let dt = chrono::DateTime::from_timestamp(message.timestamp, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_else(|| message.timestamp.to_string());
+        out.push_str(&format!(
+            "**{}** ({}) — {}\n{}\n{}\n",
+            message.sender, dt, message.location, message.content, message.url
+        ));
+        if !hit.flags.is_empty() {
+            out.push_str(&format!("Flags: {}\n", hit.flags.join(", ")));
+        }
+        out.push('\n');
+    }
+    if let Some(before) = data.next_before {
+        out.push_str(&format!(
+            "Older messages: repeat recent with the same filters and before={before}"
+        ));
+    }
+    out
+}
+
+fn format_dms(data: &DmsOutput) -> String {
+    let mut out = format!("{}\n\n", data.note);
+    if data.conversations.is_empty() {
+        out.push_str("No recent DM conversations found.");
+        return out;
+    }
+    out.push_str("Recent DM conversations (newest activity first):\n\n");
+    for conversation in &data.conversations {
+        let names = conversation
+            .participants
+            .iter()
+            .map(|user| user.full_name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "- **{}** (latest message: {})\n  {}\n",
+            names, conversation.latest_message_id, conversation.url
+        ));
+    }
+    if let Some(before) = data.next_before {
+        out.push_str(&format!(
+            "\nMore conversations: repeat dms with the same filter and before={before}"
+        ));
+    }
+    out
+}
+
 pub const SETUP_HELP: &str = "\
 Setup: configure Zulip credentials.
 
@@ -181,6 +295,10 @@ Commands:
   zulook sites [format=json]                             List configured Zulip sites
   zulook channels <site_url> [name words] [format=json] List accessible channels
   zulook topics <channel_url> [name words] [format=json] List topics in a channel
+  zulook dms <site_url> [name words] [limit=N] [before=ID] [format=json]
+                                                        Discover recent DM conversations
+  zulook recent <site_or_conversation_url> [scope=all|channels|dms] [unread_only=true] [mentions_only=true] [limit=N] [before=ID] [format=json]
+                                                        Scan newest messages without keywords
   zulook search <site_or_conversation_url> <query words> [scope=all|channels|dms|public] [limit=N] [before=ID] [format=json]
                                                         Search messages (default limit: 50)
   zulook help                                           Show this help
@@ -193,12 +311,16 @@ Use scope=public to search accessible public channel history, including channels
 Search a channel, topic, or DM URL to restrict results to that conversation.
 Follow the result URLs to read nearby messages. Use before=ID to page to older matches.
 Run `zulook search` for search-specific help.
+Run `zulook recent` or `zulook dms` for scanning and DM discovery help.
+Reading messages does not mark them read.
 
 Credentials: create ~/.zulookrc with your API keys (run `zulook setup` for details).
 
 Examples:
   zulook channels https://rust-lang.zulipchat.com rust
   zulook topics https://rust-lang.zulipchat.com/#narrow/channel/213817-t-lang
+  zulook dms https://rust-lang.zulipchat.com
+  zulook recent https://rust-lang.zulipchat.com scope=dms unread_only=true
   zulook search https://rust-lang.zulipchat.com async drop scope=public
   zulook search https://rust-lang.zulipchat.com/#narrow/channel/213817-t-lang borrow checker format=json";
 
@@ -216,6 +338,37 @@ the search is restricted to that conversation, so omit scope.
 Example:
   zulook search https://rust-lang.zulipchat.com async drop scope=public";
 
+pub const RECENT_HELP: &str = "\
+Scan recent Zulip messages without search keywords.
+
+Usage:
+  zulook recent <site_or_conversation_url> [scope=all|channels|dms] [unread_only=true] [mentions_only=true] [limit=N] [before=ID] [format=json]
+
+With a site URL, scan your combined history or select channels or dms. With a channel,
+topic, or DM URL, scan that conversation and omit scope. Both filters can be combined
+to fetch unread mentions. Reading does not mark messages read.
+Results are newest first. The default limit is 50, maximum 1000.
+Repeat with the same filters and before=ID from the response to fetch older messages.
+
+Example:
+  zulook recent https://rust-lang.zulipchat.com scope=dms unread_only=true";
+
+pub const DMS_HELP: &str = "\
+Discover recent Zulip direct-message conversations.
+
+Usage:
+  zulook dms <site_url> [name words] [limit=N] [before=ID] [format=json]
+
+Lists one-to-one and group DMs with participant names and conversation URLs, newest
+activity first. Name words filter participant names without regard to case.
+The default limit is 50, maximum 1000. Use before=ID from the response to page.
+Zulip supplies a recent subset; pagination does not cover all historical conversations.
+Use `zulook recent <site_url> scope=dms` to scan older DM history.
+Read a returned URL with zulook to fetch that conversation's newest messages.
+
+Example:
+  zulook dms https://rust-lang.zulipchat.com";
+
 /// Dispatch a command and return the output as a string.
 /// Used by both CLI mode and MCP tool mode.
 pub async fn dispatch(store: &CredentialStore, command: &str) -> anyhow::Result<String> {
@@ -224,6 +377,10 @@ pub async fn dispatch(store: &CredentialStore, command: &str) -> anyhow::Result<
 
     match cmd {
         "help" if tokens.get(1) == Some(&"search") => Ok(SEARCH_HELP.to_string()),
+
+        "help" if tokens.get(1) == Some(&"recent") => Ok(RECENT_HELP.to_string()),
+
+        "help" if tokens.get(1) == Some(&"dms") => Ok(DMS_HELP.to_string()),
 
         "help" => Ok(HELP_TEXT.to_string()),
 
@@ -267,6 +424,32 @@ pub async fn dispatch(store: &CredentialStore, command: &str) -> anyhow::Result<
                 Ok(serde_json::to_string_pretty(&data)?)
             } else {
                 Ok(format_topics(&data))
+            }
+        }
+
+        "recent" => {
+            if tokens.len() == 1 || tokens.get(1) == Some(&"help") {
+                return Ok(RECENT_HELP.to_string());
+            }
+            let (request, json) = recent_args(tokens[1], &tokens[2..])?;
+            let data = recent(store, request).await?;
+            if json {
+                Ok(serde_json::to_string_pretty(&data)?)
+            } else {
+                Ok(format_recent(&data))
+            }
+        }
+
+        "dms" => {
+            if tokens.len() == 1 || tokens.get(1) == Some(&"help") {
+                return Ok(DMS_HELP.to_string());
+            }
+            let (request, json) = dms_args(tokens[1], &tokens[2..])?;
+            let data = list_dms(store, request).await?;
+            if json {
+                Ok(serde_json::to_string_pretty(&data)?)
+            } else {
+                Ok(format_dms(&data))
             }
         }
 
@@ -429,6 +612,78 @@ mod tests {
         let (filter, json) = list_args(&["language", "design", "format=json"]).unwrap();
         assert_eq!(filter.as_deref(), Some("language design"));
         assert!(json);
+    }
+
+    #[test]
+    fn test_recent_options_and_defaults() {
+        let (request, json) = recent_args("https://example.com", &[]).unwrap();
+        assert_eq!(request.scope, RecentScope::All);
+        assert_eq!(request.limit, 50);
+        assert!(!request.unread_only && !request.mentions_only && !json);
+        let (request, json) = recent_args(
+            "https://example.com",
+            &[
+                "scope=dms",
+                "unread_only=true",
+                "mentions_only=true",
+                "limit=10",
+                "before=123",
+                "format=json",
+            ],
+        )
+        .unwrap();
+        assert_eq!(request.scope, RecentScope::Dms);
+        assert!(request.unread_only && request.mentions_only && json);
+        assert_eq!(request.limit, 10);
+        assert_eq!(request.before, Some(123));
+        for args in [
+            vec!["scope=public"],
+            vec!["unread_only=yes"],
+            vec!["mentions_only=1"],
+            vec!["limit=bad"],
+            vec!["format=xml"],
+            vec!["unknown=true"],
+            vec!["keywords"],
+        ] {
+            assert!(recent_args("https://example.com", &args).is_err());
+        }
+    }
+
+    #[test]
+    fn test_dms_options_and_defaults() {
+        let (request, json) = dms_args("https://example.com", &[]).unwrap();
+        assert_eq!(request.filter, None);
+        assert_eq!(request.limit, 50);
+        assert_eq!(request.before, None);
+        assert!(!json);
+        let (request, json) = dms_args(
+            "https://example.com",
+            &["Alice", "Smith", "limit=10", "before=123", "format=json"],
+        )
+        .unwrap();
+        assert_eq!(request.filter.as_deref(), Some("Alice Smith"));
+        assert_eq!(request.limit, 10);
+        assert_eq!(request.before, Some(123));
+        assert!(json);
+        assert!(dms_args("https://example.com", &["scope=dms"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_scan_help() {
+        let store = CredentialStore::for_test("https://example.com".to_string());
+        for (command, help) in [("recent", RECENT_HELP), ("dms", DMS_HELP)] {
+            assert_eq!(dispatch(&store, command).await.unwrap(), help);
+            assert_eq!(
+                dispatch(&store, &format!("help {command}")).await.unwrap(),
+                help
+            );
+            assert_eq!(
+                dispatch(&store, &format!("{command} help")).await.unwrap(),
+                help
+            );
+        }
+        assert!(HELP_TEXT.contains("unread_only"));
+        assert!(HELP_TEXT.contains("zulook dms"));
     }
 
     #[tokio::test]

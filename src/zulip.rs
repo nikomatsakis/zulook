@@ -1,4 +1,5 @@
 use reqwest::Client;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
@@ -29,6 +30,8 @@ pub struct Message {
     pub stream_id: Option<i64>,
     #[serde(default)]
     pub display_recipient: Option<DisplayRecipient>,
+    #[serde(default)]
+    pub flags: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -38,7 +41,7 @@ pub enum DisplayRecipient {
     Dm(Vec<DmParticipant>),
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
 pub struct DmParticipant {
     pub id: i64,
     pub full_name: String,
@@ -75,6 +78,29 @@ pub struct TopicsData {
 pub struct Topic {
     pub name: String,
     pub max_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DmConversationsData {
+    pub user_id: i64,
+    pub recent_private_conversations: Vec<RecentDmConversation>,
+    pub realm_users: Vec<ZulipUser>,
+    #[serde(default)]
+    pub realm_non_active_users: Vec<ZulipUser>,
+    #[serde(default)]
+    pub cross_realm_bots: Vec<ZulipUser>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RecentDmConversation {
+    pub max_message_id: i64,
+    pub user_ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ZulipUser {
+    pub user_id: i64,
+    pub full_name: String,
 }
 
 // --- Narrow filter construction ---
@@ -133,6 +159,14 @@ impl Narrow {
         narrow
     }
 
+    pub fn unread() -> Self {
+        Self::new("is", serde_json::json!("unread"))
+    }
+
+    pub fn mentioned() -> Self {
+        Self::new("is", serde_json::json!("mentioned"))
+    }
+
     pub fn public_channels() -> Self {
         Self::new("channels", serde_json::json!("public"))
     }
@@ -179,6 +213,12 @@ impl ZulipClient {
             .send()
             .await?;
 
+        Self::decode_response(resp).await
+    }
+
+    async fn decode_response<T: serde::de::DeserializeOwned>(
+        resp: reqwest::Response,
+    ) -> anyhow::Result<T> {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -186,6 +226,38 @@ impl ZulipClient {
         }
 
         Ok(resp.json().await?)
+    }
+
+    pub async fn get_dm_conversations(&self) -> anyhow::Result<DmConversationsData> {
+        // Fetch only the initial state needed for discovery, without subscribing
+        // to events. The temporary queue is deleted before decoding the state so
+        // even an unsupported or malformed response cannot leak a known queue.
+        let resp = self
+            .client
+            .post(self.api_url("/register"))
+            .basic_auth(&self.email, Some(&self.api_key))
+            .form(&[
+                ("event_types", "[]"),
+                (
+                    "fetch_event_types",
+                    "[\"recent_private_conversations\",\"realm_user\"]",
+                ),
+            ])
+            .send()
+            .await?;
+        let data: serde_json::Value = Self::decode_response(resp).await?;
+        let queue_id = data["queue_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Zulip did not return an authenticated event queue"))?;
+        let resp = self
+            .client
+            .delete(self.api_url("/events"))
+            .basic_auth(&self.email, Some(&self.api_key))
+            .form(&[("queue_id", queue_id)])
+            .send()
+            .await?;
+        let _: serde_json::Value = Self::decode_response(resp).await?;
+        Ok(serde_json::from_value(data)?)
     }
 
     pub async fn get_messages(
