@@ -1,6 +1,6 @@
 [package]
 name = "zulook"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
 description = "Read-only Zulip agent mod — scan recent messages, discover DMs, browse, and search"
 license = "MIT OR Apache-2.0"
