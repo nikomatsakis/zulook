@@ -26,6 +26,9 @@ pub struct Message {
     pub sender_full_name: String,
     #[serde(default)]
     pub subject: String,
+    /// "stream" or "private".
+    #[serde(default, rename = "type")]
+    pub msg_type: String,
     #[serde(default)]
     pub stream_id: Option<i64>,
     #[serde(default)]
@@ -44,6 +47,7 @@ pub enum DisplayRecipient {
 #[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
 pub struct DmParticipant {
     pub id: i64,
+    #[serde(default)]
     pub full_name: String,
 }
 
